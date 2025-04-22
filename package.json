@@ -1,0 +1,23 @@
+{
+  "name": "react-video-app",
+  "version": "1.0.0",
+  "description": "WebRTC Video Chat Application with React frontend and Express backend",
+  "main": "index.js",
+  "scripts": {
+    "frontend": "cd BGR-FE-TEMPLATE && npm run dev",
+    "backend": "cd Express-Template && npm run dev",
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "install-all": "npm install && cd BGR-FE-TEMPLATE && npm install && cd ../Express-Template && npm install"
+  },
+  "keywords": [
+    "webrtc",
+    "video-chat",
+    "react",
+    "express"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+} 
