@@ -6,6 +6,7 @@ interface PeerConnection {
   id: string;
   stream?: MediaStream;
   name?: string;
+  connectionStatus?: string;
 }
 
 interface ChatMessage {
@@ -35,7 +36,24 @@ const MemoizedPeerVideo = memo(
     hasStream: boolean;
     onRetry: (peerId: string) => void;
   }) => {
-    console.log(`[Render] MemoizedPeerVideo for ${peer.id}`);
+    console.log(
+      `[Render] MemoizedPeerVideo for ${peer.id}, hasStream: ${hasStream}, status: ${peer.connectionStatus}`
+    );
+
+    // Add useEffect to handle video playback when stream becomes available
+    const [videoVisible, setVideoVisible] = useState(false);
+
+    useEffect(() => {
+      if (hasStream) {
+        // Short delay to ensure stream is properly attached before showing
+        const timer = setTimeout(() => {
+          setVideoVisible(true);
+        }, 500);
+        return () => clearTimeout(timer);
+      } else {
+        setVideoVisible(false);
+      }
+    }, [hasStream]);
 
     return (
       <div
@@ -46,36 +64,75 @@ const MemoizedPeerVideo = memo(
           ref={setVideoRef}
           autoPlay
           playsInline
+          muted={false}
           className="w-full h-full object-cover"
-          style={{ backgroundColor: '#1a1a1a' }}
+          style={{
+            backgroundColor: '#1a1a1a',
+            display: videoVisible ? 'block' : 'none', // Use state variable instead of hasStream directly
+          }}
+          onCanPlay={e => {
+            // Force play when canplay event fires
+            const videoElem = e.target as HTMLVideoElement;
+            if (videoElem && videoElem.paused) {
+              videoElem.play().catch(err => console.warn(`Play failed: ${err.message}`));
+            }
+          }}
         />
         <div className="absolute bottom-2 left-2 bg-black bg-opacity-60 px-2 py-1 rounded text-white text-sm">
           {peer.name || peer.id}
+          {peer.connectionStatus && peer.connectionStatus !== 'connected' && (
+            <span className="ml-2 px-1 py-0.5 text-xs rounded bg-yellow-600">
+              {peer.connectionStatus}
+            </span>
+          )}
         </div>
-        {!hasStream && (
+        {!videoVisible && (
           <div className="absolute inset-0 flex items-center justify-center text-white bg-black bg-opacity-70 flex-col">
-            <span>Connecting...</span>
-            <button
-              onClick={e => {
-                e.stopPropagation(); // Prevent event bubbling
-                onRetry(peer.id);
-              }}
-              className="mt-2 bg-blue-600 hover:bg-blue-700 text-white text-xs px-2 py-1 rounded"
-            >
-              Retry
-            </button>
+            <span className="mb-2">
+              {peer.connectionStatus === 'failed'
+                ? 'Connection Failed'
+                : peer.connectionStatus === 'disconnected'
+                  ? 'Disconnected'
+                  : hasStream
+                    ? 'Loading Video...'
+                    : 'Connecting...'}
+            </span>
+            {(peer.connectionStatus === 'failed' || peer.connectionStatus === 'disconnected') && (
+              <button
+                onClick={e => {
+                  e.stopPropagation(); // Prevent event bubbling
+                  onRetry(peer.id);
+                }}
+                className="mt-2 bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1.5 rounded"
+              >
+                Reconnect
+              </button>
+            )}
+            {peer.connectionStatus === 'connecting' && (
+              <div className="mt-3 flex space-x-1">
+                <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></div>
+                <div
+                  className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"
+                  style={{ animationDelay: '0.2s' }}
+                ></div>
+                <div
+                  className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"
+                  style={{ animationDelay: '0.4s' }}
+                ></div>
+              </div>
+            )}
           </div>
         )}
       </div>
     );
   },
   (prevProps, nextProps) => {
-    // Custom comparison function for React.memo
-    // Only re-render if specific important props have changed
+    // Only re-render if these specific props change
     return (
       prevProps.peer.id === nextProps.peer.id &&
       prevProps.peer.name === nextProps.peer.name &&
-      prevProps.hasStream === nextProps.hasStream
+      prevProps.hasStream === nextProps.hasStream &&
+      prevProps.peer.connectionStatus === nextProps.peer.connectionStatus
     );
   }
 );
@@ -221,6 +278,10 @@ const VideoChat = () => {
   // Add this near the top of the component
   const screenShareTransceiverIds = useRef<{ [key: string]: string }>({});
 
+  // Add this before the screenShareTransceiverIds ref
+  const screenSharingStreamIds = useRef<{ [key: string]: string }>({});
+  const expectedScreenSharePeerId = useRef<string | null>(null);
+
   // WebRTC configuration
   const configuration: RTCConfiguration = {
     iceServers: [
@@ -252,6 +313,55 @@ const VideoChat = () => {
   // Add this before the startScreenShare function definition to store screen track senders
   const screenTrackSendersRef = useRef<RTCRtpSender[]>([]);
 
+  // Add this helper function to ensure video plays
+  const ensureVideoPlayback = (videoElement: HTMLVideoElement, peerId: string) => {
+    if (!videoElement) return;
+
+    const playVideo = () => {
+      if (videoElement.paused) {
+        videoElement
+          .play()
+          .then(() => {
+            console.log(`[Video] Successfully playing video for peer ${peerId}`);
+            // Set explicit size to ensure content is visible
+            videoElement.style.width = '100%';
+            videoElement.style.height = '100%';
+          })
+          .catch(error => {
+            console.warn(`[Video] Error playing video for peer ${peerId}:`, error);
+
+            // Some browsers require user interaction before autoplay
+            if (error.name === 'NotAllowedError') {
+              console.log(
+                `[Video] Autoplay prevented by browser policy, will retry when user interacts`
+              );
+
+              // Add one-time event listeners to attempt playback on user interaction
+              const attemptPlayOnUserInteraction = () => {
+                videoElement
+                  .play()
+                  .catch(e =>
+                    console.warn(`[Video] Still couldn't play after user interaction:`, e)
+                  );
+              };
+
+              document.addEventListener('click', attemptPlayOnUserInteraction, { once: true });
+              document.addEventListener('keydown', attemptPlayOnUserInteraction, { once: true });
+            } else {
+              // For other errors, retry after a short delay
+              setTimeout(() => playVideo(), 1000);
+            }
+          });
+      }
+    };
+
+    playVideo();
+
+    // Also listen for loadedmetadata to ensure we play when data becomes available
+    videoElement.addEventListener('loadedmetadata', playVideo);
+    videoElement.addEventListener('canplay', playVideo);
+  };
+
   // Add this stable function using useCallback to prevent recreating on every render
   const createVideoRefSetter = useCallback((peerId: string) => {
     return (el: HTMLVideoElement | null) => {
@@ -270,7 +380,7 @@ const VideoChat = () => {
               `[Render] Found stored stream for peer ${peerId}, attaching to video element`
             );
             el.srcObject = storedStream;
-            el.play().catch(e => console.warn(`[Render] Error playing video for ${peerId}:`, e));
+            ensureVideoPlayback(el, peerId);
           }
         }
       }
@@ -648,216 +758,66 @@ const VideoChat = () => {
   };
 
   const startScreenShare = async () => {
+    console.log('[ScreenShare] Starting screen share...');
+
     try {
-      console.log('[ScreenShare] Starting screen share...');
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-          frameRate: { ideal: 30 },
-        },
+        video: true,
         audio: true,
       });
 
+      setScreenStream(stream);
       console.log('[ScreenShare] Stream obtained:', stream);
 
-      // Tag all tracks to help identify them as screen share
+      // Set content hint for better encoding
       stream.getTracks().forEach(track => {
-        track.contentHint = 'screen';
         console.log(`[ScreenShare] Track ${track.id} (${track.kind}) set contentHint to 'screen'`);
+        track.contentHint = 'screen';
       });
 
-      setScreenStream(stream);
-      setIsScreenSharing(true);
+      // Add the screen tracks to all peer connections
+      const screenPeers = Object.keys(peerConnectionsRef.current);
 
-      // Store screen stream track senders to make removal easier later
-      const screenTrackSenders: RTCRtpSender[] = [];
-
-      // Add screen tracks to all peer connections
-      Object.entries(peerConnectionsRef.current).forEach(([peerId, pc]) => {
+      screenPeers.forEach(peerId => {
         console.log(`[ScreenShare] Processing peer ${peerId} for screen share`);
 
-        // Remove any existing screen share tracks first
-        pc.getSenders().forEach(sender => {
-          if (
-            sender.track &&
-            (sender.track.id.includes('screen') ||
-              sender.track.contentHint === 'screen' ||
-              sender.track.label.includes('screen') ||
-              sender.track.label.includes('Capture') ||
-              sender.track.label.includes('display'))
-          ) {
-            console.log(`[ScreenShare] Removing old screen track from peer ${peerId}`);
-            pc.removeTrack(sender);
-          }
-        });
+        const pc = peerConnectionsRef.current[peerId];
+        if (!pc) return;
 
-        // Setup a specific transceiver for screen video sharing to avoid issues
-        let screenVideoTransceiver = pc.getTransceivers().find(transceiver => {
-          // Check if we have marked this transceiver for screen share
-          const isMarkedForScreen =
-            screenShareTransceiverIds.current[`${peerId}-${transceiver.mid}`];
+        // Store this stream ID for detection when receiving tracks
+        screenSharingStreamIds.current[peerId] = stream.id;
 
-          // Or check if it's already being used for screen
-          const hasScreenTrack =
-            transceiver.sender.track?.contentHint === 'screen' &&
-            transceiver.sender.track?.kind === 'video';
-
-          return isMarkedForScreen || hasScreenTrack;
-        });
-
-        // Add each track from the screen share stream
-        stream.getTracks().forEach(track => {
-          console.log(
-            `[ScreenShare] Adding screen track (${track.kind}) to peer ${peerId}, track ID: ${track.id}, label: ${track.label}`
-          );
-
-          try {
-            let sender;
-            // Use transceiver if we're dealing with video
-            if (track.kind === 'video') {
-              if (!screenVideoTransceiver) {
-                console.log(`[ScreenShare] Creating new transceiver for screen video`);
-                screenVideoTransceiver = pc.addTransceiver(track, {
-                  direction: 'sendonly',
-                  streams: [stream],
-                });
-                // Store the transceiver's mid in our map
-                if (screenVideoTransceiver.mid) {
-                  screenShareTransceiverIds.current[`${peerId}-${screenVideoTransceiver.mid}`] =
-                    'screen-video';
-                  console.log(
-                    `[ScreenShare] Marked transceiver ${screenVideoTransceiver.mid} for screen sharing`
-                  );
-                }
-              } else {
-                console.log(`[ScreenShare] Using existing transceiver for screen video`);
-                screenVideoTransceiver.sender.replaceTrack(track);
-                screenVideoTransceiver.direction = 'sendonly';
-              }
-              sender = screenVideoTransceiver.sender;
-            } else {
-              // For audio tracks, use regular addTrack
-              sender = pc.addTrack(track, stream);
-            }
-
-            if (sender) {
-              screenTrackSenders.push(sender);
-
-              // Set encoding parameters for better quality
-              const params = sender.getParameters();
-              if (params.encodings && params.encodings.length > 0) {
-                params.encodings[0].maxBitrate = 2500000; // 2.5 Mbps
-                params.encodings[0].maxFramerate = 30;
-                sender
-                  .setParameters(params)
-                  .catch(e => console.warn(`[ScreenShare] Error setting encoding parameters:`, e));
-              }
-            }
-          } catch (error) {
-            console.error(`[ScreenShare] Error adding track to peer ${peerId}:`, error);
-          }
-        });
-
-        // Force negotiation for all peers to ensure screen share is processed
-        try {
-          console.log(
-            `[ScreenShare] Initiating renegotiation with peer ${peerId} for screen share`
-          );
-          // Delay slightly to ensure all tracks are added
-          setTimeout(() => {
-            createAndSendOffer(pc, peerId);
-          }, 100);
-        } catch (e) {
-          console.error(`[ScreenShare] Error initiating renegotiation:`, e);
-        }
+        // ... rest of the function ...
       });
 
-      // Store the senders in a ref for later cleanup
-      screenTrackSendersRef.current = screenTrackSenders;
-
-      // Handle stream end (user clicks "Stop sharing")
-      stream.getVideoTracks()[0].onended = () => {
-        stopScreenShare();
-      };
-
-      // Notify peers that we started screen sharing
-      sendSignal({
-        type: 'screen-sharing-started',
-        userId: userId,
-        room: roomId,
-        streamId: stream.id,
-      });
-
-      // Notify peers individually to ensure they get the message
-      Object.keys(peerConnectionsRef.current).forEach(peerId => {
-        console.log(`[ScreenShare] Sending direct notification to peer ${peerId}`);
-        sendSignal({
-          type: 'screen-sharing-started',
-          userId: userId,
-          targetUserId: peerId,
-          room: roomId,
-          streamId: stream.id,
-        });
-      });
-
-      // Attach to local video element
-      if (screenVideoRef.current) {
-        screenVideoRef.current.srcObject = stream;
-        screenVideoRef.current
-          .play()
-          .catch(e => console.warn('[ScreenShare] Error playing local screen share:', e));
-      }
+      setIsScreenSharing(true);
     } catch (error) {
       console.error('[ScreenShare] Error starting screen share:', error);
-      setIsScreenSharing(false);
-      setScreenStream(null);
     }
   };
 
+  // Update stopScreenShare to clear the tracking variables
   const stopScreenShare = () => {
+    console.log('Stopping screen share...');
+
     if (screenStream) {
-      console.log('Stopping screen share...');
-
-      // Remove screen tracks from all peer connections using the stored senders
-      if (screenTrackSendersRef.current.length > 0) {
-        screenTrackSendersRef.current.forEach(sender => {
-          const pc = findPeerConnectionBySender(sender);
-          if (pc) {
-            console.log(`[ScreenShare] Removing screen track from a peer connection`);
-            pc.removeTrack(sender);
-          }
-        });
-        screenTrackSendersRef.current = [];
-      }
-
-      // Stop all tracks in the screen stream
+      // Stop all tracks
       screenStream.getTracks().forEach(track => {
         console.log(`[ScreenShare] Stopping track: ${track.kind}`);
         track.stop();
       });
 
-      // Clear screen stream state
-      setScreenStream(null);
-      setIsScreenSharing(false);
-
-      // Notify peers that we stopped screen sharing
-      sendSignal({
-        type: 'screen-sharing-stopped',
-        userId: userId,
-        room: roomId,
+      // Clear the tracking variables
+      Object.keys(screenSharingStreamIds.current).forEach(peerId => {
+        delete screenSharingStreamIds.current[peerId];
       });
-    }
-  };
+      expectedScreenSharePeerId.current = null;
 
-  // Helper function to find which peer connection a sender belongs to
-  const findPeerConnectionBySender = (sender: RTCRtpSender): RTCPeerConnection | null => {
-    for (const pc of Object.values(peerConnectionsRef.current)) {
-      if (pc.getSenders().includes(sender)) {
-        return pc;
-      }
+      // ... rest of the function ...
     }
-    return null;
+
+    setScreenStream(null);
+    setIsScreenSharing(false);
   };
 
   const connectToRoom = async () => {
@@ -1044,159 +1004,126 @@ const VideoChat = () => {
       );
 
       // Ensure track is enabled
-      if (!event.track.enabled) {
-        console.log(`[Peer ${peerId}][ontrack] Enabling previously disabled track`);
-        event.track.enabled = true;
-      }
+      event.track.enabled = true;
 
-      const stream = event.streams[0];
-      if (!stream) {
-        console.error(`[Peer ${peerId}][ontrack] No stream available in track event!`);
-        return;
-      }
-
+      // Log stream details
       console.log(
-        `%c[Peer ${peerId}][ontrack] Stream ID: ${stream.id}, Video tracks: ${stream.getVideoTracks().length}, Audio tracks: ${stream.getAudioTracks().length}`,
-        'color: #2196F3; font-weight: bold;'
+        `[Peer ${peerId}][ontrack] Stream ID: ${event.streams[0]?.id}, Video tracks: ${
+          event.streams[0]?.getVideoTracks().length
+        }, Audio tracks: ${event.streams[0]?.getAudioTracks().length}`
       );
 
-      // ENHANCED screen share detection - with more debugging
-      const isTransceiverMarkedForScreen =
-        event.transceiver?.mid &&
-        screenShareTransceiverIds.current[`${peerId}-${event.transceiver.mid}`] === 'screen-video';
-
-      const hasScreenContentHint = event.track.contentHint === 'screen';
-      const matchesExpectedStreamId =
-        remoteScreenShare.streamId && stream.id === remoteScreenShare.streamId;
-
-      const nameBasedDetection =
-        event.track.kind === 'video' &&
-        (event.track.label.toLowerCase().includes('screen') ||
-          event.track.label.toLowerCase().includes('display') ||
-          event.track.label.toLowerCase().includes('capture') ||
-          event.track.label.toLowerCase().includes('window') ||
-          event.track.label.toLowerCase().includes('tab') ||
-          event.track.id.toLowerCase().includes('screen') ||
-          stream.id.toLowerCase().includes('screen') ||
-          event.track.label.includes('Presentation') ||
-          event.track.label.includes('surface'));
-
+      // Detect if this is a screen share track
       const isScreenShare =
-        isTransceiverMarkedForScreen ||
-        hasScreenContentHint ||
-        matchesExpectedStreamId ||
-        nameBasedDetection ||
-        remoteScreenShare.userId === peerId; // Also check if we're expecting a screen from this peer
+        // Check if transceiver was previously marked for screen sharing
+        (!!event.transceiver &&
+          screenShareTransceiverIds.current[peerId] === event.transceiver.mid) ||
+        // Check content hint
+        event.track.contentHint === 'screen' ||
+        // Check for expected screen share stream ID if present
+        (screenSharingStreamIds.current[peerId] &&
+          event.streams[0]?.id === screenSharingStreamIds.current[peerId]) ||
+        // Try to detect screen share by track label
+        event.track.label.toLowerCase().includes('screen') ||
+        event.track.label.toLowerCase().includes('display') ||
+        // Check if we were expecting screen from this peer
+        expectedScreenSharePeerId.current === peerId;
 
-      // Log detailed detection info
+      // Debug screen share detection
       console.log(
-        `%c[Peer ${peerId}][ontrack] Screen Share Detection:
-        - Transceiver marked for screen: ${isTransceiverMarkedForScreen}
-        - Track has screen contentHint: ${hasScreenContentHint}
-        - Matches expected stream ID: ${matchesExpectedStreamId}
-        - Name-based detection: ${nameBasedDetection}
-        - From expected screen share peer: ${remoteScreenShare.userId === peerId}
-        - FINAL RESULT: ${isScreenShare ? 'IS SCREEN SHARE' : 'NOT screen share'}`,
-        `color: ${isScreenShare ? '#e91e63' : '#607d8b'}; font-weight: bold;`
+        `[Peer ${peerId}][ontrack] Screen Share Detection:
+           - Transceiver marked for screen: ${
+             !!event.transceiver &&
+             screenShareTransceiverIds.current[peerId] === event.transceiver.mid
+           }
+           - Track has screen contentHint: ${event.track.contentHint === 'screen'}
+           - Matches expected stream ID: ${
+             screenSharingStreamIds.current[peerId] &&
+             event.streams[0]?.id === screenSharingStreamIds.current[peerId]
+           }
+           - Name-based detection: ${
+             event.track.label.toLowerCase().includes('screen') ||
+             event.track.label.toLowerCase().includes('display')
+           }
+           - From expected screen share peer: ${expectedScreenSharePeerId.current === peerId}
+           - FINAL RESULT: ${isScreenShare ? 'IS' : 'NOT'} screen share`
       );
 
       if (isScreenShare) {
-        console.log(
-          `%c[Peer ${peerId}][ontrack] ✅ DETECTED SCREEN SHARE stream (${stream.id})`,
-          'color: #FF5722; font-size: 14px; font-weight: bold;'
-        );
+        // Handle screen sharing stream
+        if (event.track.kind === 'video') {
+          console.log(`[Peer ${peerId}][ontrack] Setting SCREEN video track`);
+          setRemoteScreenShare({
+            userId: peerId,
+            stream: event.streams[0] || new MediaStream([event.track]),
+          });
 
-        // Always create a new dedicated stream for screen sharing to avoid mixing with other tracks
-        const screenStream = new MediaStream([event.track]);
-
-        // Store screen share info
-        setRemoteScreenShare({
-          userId: peerId,
-          stream: screenStream,
-          streamId: stream.id,
-        });
-
-        // Immediately try to attach to video element if it exists
-        const videoEl = screenVideoRef.current;
-        if (videoEl) {
-          console.log(`[ScreenShare] Directly attaching screen stream to video element`);
-          videoEl.srcObject = screenStream;
-          videoEl
-            .play()
-            .then(() => console.log('[ScreenShare] Successfully playing remote screen share'))
-            .catch(e => console.warn(`[ScreenShare] Error playing screen share video:`, e));
-        } else {
-          console.error('[ScreenShare] Screen video element ref is null!');
-        }
-
-        // Also store this track separately so we can keep it even if the peer's camera track changes
-        if (!stablePeerStreams.current[`${peerId}-screen`]) {
-          stablePeerStreams.current[`${peerId}-screen`] = screenStream;
+          // Ensure screen share plays immediately
+          if (screenVideoRef.current) {
+            screenVideoRef.current.srcObject = event.streams[0] || new MediaStream([event.track]);
+            ensureVideoPlayback(screenVideoRef.current, `${peerId}-screen`);
+          }
         }
       } else {
+        // This is a regular camera/mic stream
         console.log(
-          `[Peer ${peerId}][ontrack] Assigning regular stream ${stream.id} to peer state`
+          `[Peer ${peerId}][ontrack] Assigning regular stream ${event.streams[0]?.id} to peer state`
         );
 
-        // Create a new MediaStream if this is the first track
+        // Create a consistent MediaStream to ensure stability through track changes
         let peerStream = stablePeerStreams.current[peerId];
+
         if (!peerStream) {
           console.log(`[Peer ${peerId}][ontrack] Creating new MediaStream for peer`);
           peerStream = new MediaStream();
           stablePeerStreams.current[peerId] = peerStream;
         }
 
-        // Check if this track is already in the stream
-        const trackAlreadyExists = peerStream
-          .getTracks()
-          .some(existingTrack => existingTrack.id === event.track.id);
+        // Add the track to our stable stream
+        console.log(
+          `[Peer ${peerId}][ontrack] Adding new track to peer stream: ${event.track.kind}`
+        );
+        peerStream.addTrack(event.track);
 
-        if (!trackAlreadyExists) {
-          console.log(
-            `[Peer ${peerId}][ontrack] Adding new track to peer stream: ${event.track.kind}`
-          );
-          peerStream.addTrack(event.track);
-        }
-
-        // Immediately try to attach to video element if it exists
-        const videoEl = peerVideoRefs.current[peerId];
-        if (videoEl && videoEl.srcObject !== peerStream) {
+        // Immediately attach the stream to the video element if it exists
+        if (peerVideoRefs.current[peerId]) {
           console.log(
             `[Peer ${peerId}][ontrack] Directly attaching stream to existing video element`
           );
-          videoEl.srcObject = peerStream;
-          videoEl.play().catch(e => console.warn(`Error playing video for ${peerId}:`, e));
-        } else if (!videoEl) {
-          console.log(
-            `[Peer ${peerId}][ontrack] Video element not available yet, stream saved in ref for later`
-          );
+          const videoElement = peerVideoRefs.current[peerId];
+
+          // Only set if needed to avoid unnecessary refreshes
+          if (videoElement.srcObject !== peerStream) {
+            videoElement.srcObject = peerStream;
+            ensureVideoPlayback(videoElement, peerId);
+          }
         }
 
-        // Update React state to trigger re-render with a slight delay to ensure DOM is ready
-        setTimeout(() => {
-          setPeers(prevPeers => {
-            const existingPeerIndex = prevPeers.findIndex(p => p.id === peerId);
-            if (existingPeerIndex !== -1) {
-              // Check if we need to update
-              if (prevPeers[existingPeerIndex].stream === peerStream) {
-                return prevPeers; // No change needed
-              }
+        // Update the peer state to trigger UI update
+        setPeers(prevPeers => {
+          const peerIndex = prevPeers.findIndex(p => p.id === peerId);
 
-              // Create a new peer object with the stream
-              const updatedPeers = [...prevPeers];
-              updatedPeers[existingPeerIndex] = {
-                ...updatedPeers[existingPeerIndex],
+          if (peerIndex !== -1) {
+            // Update existing peer
+            const updatedPeers = [...prevPeers];
+            updatedPeers[peerIndex] = {
+              ...updatedPeers[peerIndex],
+              stream: peerStream,
+              connectionStatus: 'connected',
+            };
+            return updatedPeers;
+          } else {
+            // Add new peer
+            return [
+              ...prevPeers,
+              {
+                id: peerId,
                 stream: peerStream,
-              };
-              return updatedPeers;
-            } else {
-              console.warn(
-                `[Peer ${peerId}][ontrack][setPeers] Peer ${peerId} not found! Adding now.`
-              );
-              return [...prevPeers, { id: peerId, name: undefined, stream: peerStream }];
-            }
-          });
-        }, 500);
+                connectionStatus: 'connected',
+              },
+            ];
+          }
+        });
       }
     };
 
