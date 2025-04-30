@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.28.4",
+    "lucide-react": "^0.503.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-media-recorder": "^1.7.1",

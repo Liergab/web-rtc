@@ -1,7 +1,7 @@
-import { Request, Response, NextFunction } from "express";
+import { Request, Response, NextFunction, RequestHandler } from "express";
 import Recording from "../models/RECORDING_MODEL";
 
-export const uploadRecording = async (
+export const uploadRecording: RequestHandler = async (
   req: Request,
   res: Response,
   next: NextFunction
@@ -12,10 +12,11 @@ export const uploadRecording = async (
 
     // Validate required fields
     if (!userId || !roomId || !fileName || !fileData) {
-      return res.status(400).json({
+      res.status(400).json({
         success: false,
         message: "Missing required fields",
       });
+      return;
     }
 
     // Convert base64 string to Buffer
@@ -34,21 +35,21 @@ export const uploadRecording = async (
     // Save recording to database
     await newRecording.save();
 
-    return res.status(201).json({
+    res.status(201).json({
       success: true,
       message: "Recording uploaded successfully",
       recordingId: newRecording._id,
     });
   } catch (error) {
     console.error("Error uploading recording:", error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: "Failed to upload recording",
     });
   }
 };
 
-export const getRecordings = async (
+export const getRecordings: RequestHandler = async (
   req: Request,
   res: Response,
   next: NextFunction
@@ -66,21 +67,21 @@ export const getRecordings = async (
       .select("-fileData")
       .sort({ createdAt: -1 });
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
       count: recordings.length,
       recordings,
     });
   } catch (error) {
     console.error("Error fetching recordings:", error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: "Failed to fetch recordings",
     });
   }
 };
 
-export const getRecording = async (
+export const getRecording: RequestHandler = async (
   req: Request,
   res: Response,
   next: NextFunction
@@ -91,10 +92,11 @@ export const getRecording = async (
     const recording = await Recording.findById(id);
 
     if (!recording) {
-      return res.status(404).json({
+      res.status(404).json({
         success: false,
         message: "Recording not found",
       });
+      return;
     }
 
     // Set appropriate headers
@@ -105,17 +107,17 @@ export const getRecording = async (
     );
 
     // Send the file data
-    return res.send(recording.fileData);
+    res.send(recording.fileData);
   } catch (error) {
     console.error("Error fetching recording:", error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: "Failed to fetch recording",
     });
   }
 };
 
-export const deleteRecording = async (
+export const deleteRecording: RequestHandler = async (
   req: Request,
   res: Response,
   next: NextFunction
@@ -126,19 +128,20 @@ export const deleteRecording = async (
     const recording = await Recording.findByIdAndDelete(id);
 
     if (!recording) {
-      return res.status(404).json({
+      res.status(404).json({
         success: false,
         message: "Recording not found",
       });
+      return;
     }
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
       message: "Recording deleted successfully",
     });
   } catch (error) {
     console.error("Error deleting recording:", error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: "Failed to delete recording",
     });

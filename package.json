@@ -19,5 +19,8 @@
   "license": "MIT",
   "devDependencies": {
     "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "@heroicons/react": "^2.2.0"
   }
-} 
+}
