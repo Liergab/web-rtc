@@ -314,11 +314,23 @@ const VideoChat = () => {
   const screenTrackSendersRef = useRef<RTCRtpSender[]>([]);
 
   // Add this helper function to ensure video plays
-  const ensureVideoPlayback = (videoElement: HTMLVideoElement, peerId: string) => {
-    if (!videoElement) return;
+  const ensureVideoPlayback = (
+    videoElement: HTMLVideoElement,
+    peerId: string,
+    stream: MediaStream | null
+  ) => {
+    if (!videoElement || !stream) return;
+
+    // Check if the correct stream is already attached
+    if (videoElement.srcObject !== stream) {
+      console.log(`[Video] Attaching stream ${stream.id} to video element for ${peerId}`);
+      videoElement.srcObject = stream;
+    }
 
     const playVideo = () => {
-      if (videoElement.paused) {
+      // Only play if the video element still has the intended stream attached
+      if (videoElement.srcObject === stream && videoElement.paused) {
+        console.log(`[Video] Attempting to play video for peer ${peerId}`);
         videoElement
           .play()
           .then(() => {
@@ -328,64 +340,88 @@ const VideoChat = () => {
             videoElement.style.height = '100%';
           })
           .catch(error => {
-            console.warn(`[Video] Error playing video for peer ${peerId}:`, error);
+            // Don't log AbortError as a warning, it's often expected during stream changes
+            if (error.name !== 'AbortError') {
+              console.warn(`[Video] Error playing video for peer ${peerId}:`, error);
+            }
 
             // Some browsers require user interaction before autoplay
             if (error.name === 'NotAllowedError') {
               console.log(
-                `[Video] Autoplay prevented by browser policy, will retry when user interacts`
+                `[Video] Autoplay prevented by browser policy for ${peerId}, will retry when user interacts`
               );
 
               // Add one-time event listeners to attempt playback on user interaction
               const attemptPlayOnUserInteraction = () => {
-                videoElement
-                  .play()
-                  .catch(e =>
-                    console.warn(`[Video] Still couldn't play after user interaction:`, e)
-                  );
+                // Check again if the element still exists and has the correct stream
+                if (videoElement && videoElement.srcObject === stream) {
+                  videoElement
+                    .play()
+                    .catch(e =>
+                      console.warn(
+                        `[Video] Still couldn't play ${peerId} after user interaction:`,
+                        e
+                      )
+                    );
+                }
               };
 
               document.addEventListener('click', attemptPlayOnUserInteraction, { once: true });
               document.addEventListener('keydown', attemptPlayOnUserInteraction, { once: true });
-            } else {
-              // For other errors, retry after a short delay
-              setTimeout(() => playVideo(), 1000);
+            } else if (error.name !== 'AbortError') {
+              // For other errors (excluding AbortError), retry after a short delay
+              setTimeout(() => playVideo(), 1500); // Increased delay slightly
             }
           });
       }
     };
 
-    playVideo();
+    // Use requestAnimationFrame to ensure the DOM is ready before playing
+    requestAnimationFrame(playVideo);
 
     // Also listen for loadedmetadata to ensure we play when data becomes available
-    videoElement.addEventListener('loadedmetadata', playVideo);
-    videoElement.addEventListener('canplay', playVideo);
+    const onMetadataLoaded = () => {
+      if (videoElement.srcObject === stream) {
+        // Double check stream hasn't changed
+        playVideo();
+      }
+    };
+    videoElement.removeEventListener('loadedmetadata', onMetadataLoaded); // Remove previous listener if any
+    videoElement.addEventListener('loadedmetadata', onMetadataLoaded);
+
+    const onCanPlay = () => {
+      if (videoElement.srcObject === stream) {
+        // Double check stream hasn't changed
+        playVideo();
+      }
+    };
+    videoElement.removeEventListener('canplay', onCanPlay); // Remove previous listener if any
+    videoElement.addEventListener('canplay', onCanPlay);
   };
 
   // Add this stable function using useCallback to prevent recreating on every render
   const createVideoRefSetter = useCallback((peerId: string) => {
     return (el: HTMLVideoElement | null) => {
       // Only set the ref if it changes
-      if (el !== peerVideoRefs.current[peerId]) {
+      if (el && el !== peerVideoRefs.current[peerId]) {
         peerVideoRefs.current[peerId] = el;
+        console.log(`[Render] NEW video element ref set for peer ${peerId}`);
 
-        // If we have a video element and a stored stream, attach them right away
-        if (el) {
-          console.log(`[Render] Setting up video element for peer ${peerId}`);
-
-          // Check if we have a stored stream for this peer
-          const storedStream = stablePeerStreams.current[peerId];
-          if (storedStream) {
-            console.log(
-              `[Render] Found stored stream for peer ${peerId}, attaching to video element`
-            );
-            el.srcObject = storedStream;
-            ensureVideoPlayback(el, peerId);
-          }
+        // If we have a stored stream, attach and try playing
+        const storedStream = stablePeerStreams.current[peerId];
+        if (storedStream) {
+          console.log(
+            `[Render] Found stored stream for peer ${peerId}, attaching via ensureVideoPlayback`
+          );
+          ensureVideoPlayback(el, peerId, storedStream);
         }
+      } else if (!el && peerVideoRefs.current[peerId]) {
+        // Element is being removed (unmounted)
+        console.log(`[Render] Video element ref REMOVED for peer ${peerId}`);
+        delete peerVideoRefs.current[peerId];
       }
     };
-  }, []);
+  }, []); // Keep dependencies empty if ensureVideoPlayback is stable or defined outside
 
   const handleRetryConnection = useCallback((peerId: string) => {
     console.log(`[UI] Retry button clicked for peer ${peerId}`);
@@ -949,12 +985,30 @@ const VideoChat = () => {
 
     // Enhanced Connection State Logging and Recovery
     peerConnection.onconnectionstatechange = () => {
+      const newState = peerConnection.connectionState;
       console.log(
-        `%c[Peer ${peerId}] Connection State: ${peerConnection.connectionState}`,
+        `%c[Peer ${peerId}] Connection State: ${newState}`,
         'color: orange; font-weight: bold;'
       );
 
-      if (peerConnection.connectionState === 'failed') {
+      // Update the peer's connection status in the React state
+      setPeers(prevPeers => {
+        const peerIndex = prevPeers.findIndex(p => p.id === peerId);
+        if (peerIndex !== -1) {
+          // Only update if the state actually changed
+          if (prevPeers[peerIndex].connectionStatus !== newState) {
+            const updatedPeers = [...prevPeers];
+            updatedPeers[peerIndex] = {
+              ...updatedPeers[peerIndex],
+              connectionStatus: newState as any,
+            };
+            return updatedPeers;
+          }
+        }
+        return prevPeers; // Return original array if no change
+      });
+
+      if (newState === 'failed') {
         console.error(`[Peer ${peerId}] Connection failed! Attempting recovery...`);
 
         // Check if we've already attempted a retry recently to avoid infinite loops
@@ -966,25 +1020,71 @@ const VideoChat = () => {
           peerConnectionRetryTimesRef.current[peerId] = now;
           retryConnection(peerId);
         }
-      } else if (peerConnection.connectionState === 'connected') {
+      } else if (newState === 'connected') {
         console.log(`[Peer ${peerId}] Successfully connected!`);
+      } else if (newState === 'disconnected') {
+        console.log(`[Peer ${peerId}] Connection disconnected.`);
+        // Optionally attempt retry on disconnect
+        // retryConnection(peerId);
       }
     };
 
     // Also log ICE connection state for older browser compatibility / more detail
     peerConnection.oniceconnectionstatechange = () => {
+      const iceState = peerConnection.iceConnectionState;
       console.log(
-        `%c[Peer ${peerId}] ICE Connection State: ${peerConnection.iceConnectionState}`,
+        `%c[Peer ${peerId}] ICE Connection State: ${iceState}`,
         'color: cyan; font-weight: bold;'
       );
 
-      if (peerConnection.iceConnectionState === 'failed') {
-        console.error(`[Peer ${peerId}] ICE connection failed! Considering retry...`);
-      } else if (peerConnection.iceConnectionState === 'connected') {
-        console.log(`[Peer ${peerId}] ICE connection established!`);
-      } else if (peerConnection.iceConnectionState === 'checking') {
-        console.log(`[Peer ${peerId}] ICE connection checking...`);
-      }
+      // Update peer status based on ICE state too, especially for failures
+      setPeers(prevPeers => {
+        const peerIndex = prevPeers.findIndex(p => p.id === peerId);
+        if (peerIndex !== -1) {
+          let shouldUpdate = false;
+          let newStatus = prevPeers[peerIndex].connectionStatus;
+
+          if (iceState === 'failed' && newStatus !== 'failed') {
+            newStatus = 'failed';
+            shouldUpdate = true;
+            console.error(`[Peer ${peerId}] ICE connection failed! Marking peer as failed.`);
+            // Trigger retry based on ICE failure
+            retryConnection(peerId);
+          } else if (
+            iceState === 'disconnected' &&
+            newStatus !== 'disconnected' &&
+            newStatus !== 'failed'
+          ) {
+            newStatus = 'disconnected';
+            shouldUpdate = true;
+            console.log(`[Peer ${peerId}] ICE connection disconnected.`);
+          } else if (
+            iceState === 'closed' &&
+            newStatus !== 'disconnected' &&
+            newStatus !== 'failed'
+          ) {
+            newStatus = 'disconnected'; // Treat closed as disconnected for UI
+            shouldUpdate = true;
+            console.log(`[Peer ${peerId}] ICE connection closed.`);
+          } else if (iceState === 'completed' || iceState === 'connected') {
+            if (newStatus !== 'connected') {
+              newStatus = 'connected';
+              shouldUpdate = true;
+              console.log(`[Peer ${peerId}] ICE connection established.`);
+            }
+          }
+
+          if (shouldUpdate) {
+            const updatedPeers = [...prevPeers];
+            updatedPeers[peerIndex] = {
+              ...updatedPeers[peerIndex],
+              connectionStatus: newStatus,
+            };
+            return updatedPeers;
+          }
+        }
+        return prevPeers;
+      });
     };
 
     // Handle negotiation needed event
@@ -1053,15 +1153,16 @@ const VideoChat = () => {
         // Handle screen sharing stream
         if (event.track.kind === 'video') {
           console.log(`[Peer ${peerId}][ontrack] Setting SCREEN video track`);
+          const screenStream = event.streams[0] || new MediaStream([event.track]); // Define screenStream here
           setRemoteScreenShare({
             userId: peerId,
-            stream: event.streams[0] || new MediaStream([event.track]),
+            stream: screenStream, // Pass the defined screenStream
           });
 
           // Ensure screen share plays immediately
           if (screenVideoRef.current) {
-            screenVideoRef.current.srcObject = event.streams[0] || new MediaStream([event.track]);
-            ensureVideoPlayback(screenVideoRef.current, `${peerId}-screen`);
+            // Correctly pass the stream to ensureVideoPlayback
+            ensureVideoPlayback(screenVideoRef.current, `${peerId}-screen`, screenStream);
           }
         }
       } else {
@@ -1085,42 +1186,42 @@ const VideoChat = () => {
         );
         peerStream.addTrack(event.track);
 
-        // Immediately attach the stream to the video element if it exists
+        // Use ensureVideoPlayback here
         if (peerVideoRefs.current[peerId]) {
           console.log(
-            `[Peer ${peerId}][ontrack] Directly attaching stream to existing video element`
+            `[ontrack] Calling ensureVideoPlayback for existing video element for peer ${peerId}`
           );
-          const videoElement = peerVideoRefs.current[peerId];
-
-          // Only set if needed to avoid unnecessary refreshes
-          if (videoElement.srcObject !== peerStream) {
-            videoElement.srcObject = peerStream;
-            ensureVideoPlayback(videoElement, peerId);
-          }
+          ensureVideoPlayback(peerVideoRefs.current[peerId], peerId, peerStream);
         }
 
-        // Update the peer state to trigger UI update
+        // Update peer state (ensure this doesn't cause rapid srcObject changes)
         setPeers(prevPeers => {
           const peerIndex = prevPeers.findIndex(p => p.id === peerId);
-
           if (peerIndex !== -1) {
-            // Update existing peer
             const updatedPeers = [...prevPeers];
-            updatedPeers[peerIndex] = {
-              ...updatedPeers[peerIndex],
-              stream: peerStream,
-              connectionStatus: 'connected',
-            };
-            return updatedPeers;
+            // Only update if stream reference actually changes
+            if (updatedPeers[peerIndex].stream !== peerStream) {
+              updatedPeers[peerIndex] = {
+                ...updatedPeers[peerIndex],
+                stream: peerStream, // This might be redundant if stablePeerStreams works correctly
+                connectionStatus: 'connected', // Update status here
+              };
+              return updatedPeers;
+            } else {
+              // If stream is same, just update status if needed
+              if (updatedPeers[peerIndex].connectionStatus !== 'connected') {
+                updatedPeers[peerIndex] = {
+                  ...updatedPeers[peerIndex],
+                  connectionStatus: 'connected',
+                };
+                return updatedPeers;
+              }
+            }
+            return prevPeers; // No change needed
           } else {
-            // Add new peer
             return [
               ...prevPeers,
-              {
-                id: peerId,
-                stream: peerStream,
-                connectionStatus: 'connected',
-              },
+              { id: peerId, stream: peerStream, connectionStatus: 'connected' },
             ];
           }
         });

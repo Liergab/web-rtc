@@ -6,7 +6,7 @@
   "scripts": {
     "frontend": "cd BGR-FE-TEMPLATE && npm run dev",
     "backend": "cd Express-Template && npm run dev",
-    "dev": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "dev": "node init && concurrently \"npm run backend\" \"npm run frontend\"",
     "install-all": "npm install && cd BGR-FE-TEMPLATE && npm install && cd ../Express-Template && npm install"
   },
   "keywords": [
